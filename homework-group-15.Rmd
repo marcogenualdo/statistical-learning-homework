@@ -1,0 +1,941 @@
+---
+title: "Homework Group 15"
+author: "Basso - Genualdo - Privitera"
+date: "July 12, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Exercise 1
+
+## Part 1: visualization
+
+```{r libraries_used, results='hide'}
+# data processing packages
+suppressMessages(require(dplyr,  quietly = T))
+suppressMessages(require(wrassp,  quietly = T))
+suppressMessages(require(signal, quietly = T))
+suppressMessages(require(tuneR, quietly = T)) 
+
+# visualization packages
+suppressMessages(require(dimRed, quietly = T))
+
+# classification packages
+suppressMessages(require(class, quietly = T))
+suppressMessages(require(randomForest, quietly = T))
+suppressMessages(require(kernlab, quietly = T))
+```
+
+
+The 150 songs are stored in .au format, by reading the [.au documentation](http://pubs.opengroup.org/external/auformat.html) we learned that they consist of long vectors of signed integers centered at $0$, which represent a discretization of the amplitude of sound measured at regular intervals. The freqency of said measurements is stored in the header of the file itself in the form of measurements per second (Hz).
+
+[Apparently](https://en.wikipedia.org/wiki/Amplitude) amplitude is a measure of loudness at one point in time, so the first feature we tried to extract was some measure of average loudness in each song, which we found in the form of (Squared) Root Mean Square energy, or RMS energy, implemented in wrassp::rmsana.
+
+```{r rms_energies}
+# sample size
+n <- 150
+
+# getting data
+rms.result <- list()
+
+for (j in 1:n) {
+  rms.result[[j]] <- rmsana(paste("hw_data/hw_data/f", j, ".au", sep=""), 
+                            endTime = 25, windowSize = 1000, toFile=F)
+}
+
+# getting labels
+labels <- read.table("hw_data/hw_data/Labels.txt")$x
+
+str(rms.result[[1]])
+```
+
+As seen above the RMS energy analysis is performed locally. As a first attempt we then computed the mean and standard deviation of these vectors to see if there were some significant differences.
+
+```{r rms_averages}
+rms.avg <- rep(0,n)
+rms.sd <- rep(0,n)
+
+for (j in 1:n) {
+  rms.avg[j] <- mean(rms.result[[j]]$rms)
+  rms.sd[j] <- sd(rms.result[[j]]$rms)
+}
+
+level.mean <- list()
+level.sd <- list()
+for (level in levels(labels)) {
+  level.indices <- which(labels == level)
+  level.mean[[level]] <- mean(rms.avg[level.indices])
+  level.sd[[level]] <- mean(rms.sd[level.indices]) 
+}
+
+# printing
+do.call(rbind, Map(data.frame, Mean=level.mean, SD=level.sd))
+```
+
+No significant difference can be found in loudness, probabily because the recordings are normalized. This in turn suggests that these features can't be used to reliably classify the data, except maybe for the standard deviation, which seems to hardly separate some genres. We thus turned to the analysis of the spectrum.
+
+Our initial approach was to try to visualize and classify the data according to features such as the energy levels suggested in the homework text or MFCCs, which were backed up by some articles we read on the topic. None of these results proved particularly superior to the others though, generally achieving a 70 to 80% accuracy on the training set, and 40 to 50% on the test set. The use of dimensionality reduction tecniques such as PCA, LLE and IsoMaps only decreased training and test accuracy. Moreover none of these techniques proved useful to produce a 2d or 3d representation of the data that managed to separate any of the categories, not to mention that these results would not be intepretable anyway.
+
+We will show here the MFCC results, comparing the performance of KNN, kernel SVM and Random Forest. Although it is now shown here we tried to select optimal tuning parameters with cross validation, but it showed little difference over performance.
+
+```{r mfcc_classification}
+# mfcc parameters
+ncep = 13
+winsize = 2.
+hoptime = winsize / 2
+
+# getting data and applying mfcc
+mfcc.result <- list()
+
+# these will be of use later, ignore for now
+mfcc.avg <- matrix(rep(0,n * ncep), nrow=n, ncol=ncep)
+mfcc.sd <- matrix(rep(0,n * ncep), nrow=n, ncol=ncep)
+
+for (j in 1:n) {
+  song <- read.AsspDataObj(paste("hw_data/hw_data/f", j, ".au", sep=""))
+  song.wv <- Wave( as.numeric(song$audio), samp.rate = rate.AsspDataObj(song), bit = 16)
+
+  mfcc.result[[j]] <- melfcc(song.wv, wintime=winsize, hoptime=hoptime, numcep=ncep)
+  
+  # again, to be used later...
+  mfcc.avg[j,] <- colMeans(mfcc.result[[j]])
+  mfcc.sd[j,] <- sqrt(colMeans((mfcc.result[[j]] 
+                                - rep(1, dim(mfcc.result[[j]])[1]) %o% mfcc.avg[j,]) ^ 2))
+}
+
+# cutting data into a fixed length to form a matrix
+dim1 <- function(mat) dim(mat)[1]
+mfcc.lengths <- unlist(lapply(mfcc.result, dim1))
+min.mfcc.length <- min(mfcc.lengths)
+
+mfcc.mat <- matrix(rep(0, n * ncep * min.mfcc.length), nrow=n, ncol=ncep * min.mfcc.length)
+for (j in 1:n) {
+  mfcc.mat[j,] <- c(mfcc.result[[j]][1:min.mfcc.length,])
+}
+
+# freeing some memory
+remove(mfcc.result)
+
+
+# CLASSIFICATION
+data.mat <- mfcc.mat
+
+# creating training-testing partition
+train.index <- sample(1:n, floor(0.8 * n), replace = F)
+train.set <- data.mat[train.index,]
+test.set <- data.mat[-train.index,]
+
+# KNN classification
+test.pred <- knn(train.set, test.set, labels[train.index], k=3)
+conf.matrix <- caret::confusionMatrix(test.pred, labels[-train.index])
+conf.matrix
+
+# SVM classification
+svm <- ksvm(train.set, labels[train.index])
+test.pred <- predict(svm, test.set)
+conf.matrix <- caret::confusionMatrix(test.pred, labels[-train.index])
+conf.matrix
+
+# random forest classification
+rf.classifier <- randomForest(x=train.set, y=labels[train.index], 
+                              xtest=test.set, ytest=labels[-train.index], keep.forest = T)
+prediction <- predict(rf.classifier, test.set)
+conf.table <- caret::confusionMatrix(prediction, labels[-train.index])
+conf.table
+```
+
+This pushed us to review our approach. Instead of building an (very) high dimensional representation of the data through some individual analysis of the song's spectrograms, we tried to build simple estimates (such as average and standard deviation) from multiple spectrogram analysis techniques, namely:
+
+* Mel-scaled frequency cepstral coefficients
+* energy bands (using the code provided with the homework text)
+* foundamental frequency contour
+* zero crossing rate
+* root mean squared energy, computed earlier in this markdown
+
+We skipped autocorrelation, because it only seemed to decrease the accuracy of all teh classifiers.
+
+The idea was that generally just a few seconds are necessary to identify a song and its genre. Hence the key factors used by us humans to make such a decision must be consistent over time. For the spectrogram we used relatively wide windows, 2 seconds, since we learned about a phenomenon called the [Gabor limit](https://en.wikipedia.org/wiki/Uncertainty_principle#Signal_processing), which bounds the precision of the frequency measurement with the precision of the time measurement, similiarly to the famous Heisemberg uncertainty principle for position and momentum of a particle.
+
+```{r building_data}
+# spectrogram parameters
+song <- read.AsspDataObj("hw_data/hw_data/f1.au")
+fs <- rate.AsspDataObj(song)
+
+winsize = 2 * fs # 2 seconds
+hopsize = winsize / 2
+noverlap = winsize - hopsize
+
+# energy bands parameters
+nbands   <- 2^3
+lowB <- 100
+eps  <- .Machine$double.eps
+
+# mfcc coefficients to keep
+ncep = 13
+
+# Number of seconds of the analyzed window
+corrtime <- 15
+
+# initializing
+energy.avg <- matrix(rep(0, n * nbands), nrow = n, ncol = nbands)
+energy.sd <- matrix(rep(0, n * nbands), nrow = n, ncol = nbands)
+
+zcr.avg <- rep(0,n)
+ffc.avg <- rep(0,n)
+
+zcr.sd <- rep(0,n)
+ffc.sd <- rep(0,n)
+
+# filling features
+for (j in 1:n) {
+  song <- read.AsspDataObj(paste("hw_data/hw_data/f", j, ".au", sep=""))
+
+  zcr.result <- zcrana(paste("hw_data/hw_data/f", j, ".au", sep=""),
+                      endTime = 25, toFile=F)
+  ffc.result <- ksvF0(paste("hw_data/hw_data/f", j, ".au", sep=""),
+                      endTime = 25, toFile=F)
+  
+  # Sampling rate
+  fs <- rate.AsspDataObj(song)
+  # Short-time fourier transform
+  sp  <- specgram(x = song$audio, n = winsize, Fs = fs, window = winsize, overlap = noverlap)
+  ntm <- ncol(sp$S)  # number of (overlapping) time segments
+  
+  # Energy of bands
+  fco    <- round( c(0, lowB*(fs/2/lowB)^((0:(nbands-1))/(nbands-1)))/fs*winsize)
+  energy <- matrix(0, nbands, ntm)
+  for (tm in 1:ntm){
+    for (i in 1:nbands){
+      lower_bound <- 1 + fco[i]
+      upper_bound <- min( c( 1 + fco[i + 1], nrow(sp$S) ) )
+      energy[i, tm] <- sum( abs(sp$S[ lower_bound:upper_bound, tm ])^2 )
+    }
+  }
+  energy[energy < eps] <- eps
+  energy = 10*log10(energy)
+  
+  # computing means and standard deviations
+  energy.avg[j,] <- rowMeans(energy)
+  energy.sd[j,] <- sqrt(rowMeans((energy - energy.avg[j,] %o% rep(1,ntm)) ^ 2))
+  
+  zcr.avg[j] <- mean(zcr.result$zcr)
+  ffc.avg[j] <- mean(ffc.result$F0)
+  
+  zcr.sd[j] <- sd(zcr.result$zcr)
+  ffc.sd[j] <- sd(ffc.result$F0)
+}
+
+# building data.frame
+data <- data.frame(
+  mfcc.avg = mfcc.avg, mfcc.sd = mfcc.sd,
+  energy.avg = energy.avg, energy.sd = energy.sd,
+  zcr.avg = zcr.avg, zcr.sd = zcr.sd,
+  ffc.avg = ffc.avg, ffc.sd = ffc.sd,
+  rms.avg = rms.avg, rms.sd = rms.sd,
+  label = labels
+  )
+```
+
+We then dispensed this cocktail of covariates to a random forest, to get the importance of each one in determining one song's genre.
+
+```{r random_forest_feature_selection}
+rf.classifier <- randomForest(label ~., data, keep.forest = T)
+conf.table <- caret::confusionMatrix(rf.classifier$predicted, labels)
+conf.table
+```
+
+Clearly "rock" and "reggae" are the most misclassified genres.
+To eliminate redundant variables we computed the correlation matrix of the first few covariates.
+
+```{r random_forest_feature_selection2}
+varImpPlot(rf.classifier, n.var=10, main="Variable Importance")
+
+importance.df <- caret::varImp(rf.classifier)
+best.vars <- row.names(importance.df)[order(-importance.df$Overall)][1:10]
+
+trimmed.data <- select(data, best.vars)
+
+cor(trimmed.data)
+```
+
+We can see the the variables ffc.sd and ffc.avg are strongly correlated, but the two following these are not, namely energy.avg.1 and mfcc.sd.11.
+The following plot shows how mfcc.sd.11 and ffc.sd do indeed separate, but not cluster, three out of the five genres.
+
+```{r visualization_3_out_of_5}
+# building color map
+genre.names <- levels(labels)
+color.list <- c("black", "red", "blue", "green", "cyan")
+color.fun <- function(label) color.list[which(genre.names == label)]
+color.map <- sapply(labels, color.fun)
+
+# discarding rock and reggae
+bad.idx = which((labels == "rock") | (labels == "reggae"))
+
+plot(ffc.sd[-bad.idx], data$mfcc.sd.11[-bad.idx], col=color.map[-bad.idx],
+     main="Visualization of three out of five genres")
+legend("bottomright", legend=genre.names, col=color.list, lty=1,cex=1)
+```
+
+To try and imporove visualization, we resorted to 5 methods from the dimRed package that had been mentioned in class, namely PCA, Isomap, LLE and LaplacianEigenmaps.
+
+```{r dim_reduction_of_data}
+data.mat <- as.matrix(sapply(trimmed.data[,-ncol(data)], as.numeric), ncol=ncol(trimmed.data) - 1, nrow=n)
+
+# coordinate transformation
+embed_methods <- c("PCA", "Isomap", "LLE", "LaplacianEigenmaps", "DiffusionMaps")
+data.emb <- lapply(embed_methods, function(x) embed(data.mat, x))
+```
+
+Out of the 5 PCA, IsoMaps and LLE produced eye-pleasing results, and especially LLE managed to separate "rock" and "reggae" from eachother, but not from the other genres. We believe that this is due to the fact that not much else can be pulled from these covariates, which simply fail to describe the data well enough to be able to discern every genre.
+
+```{r}
+plot(data.emb[[3]]@data@data[bad.idx,], col=color.map[bad.idx], main="Rock and Reggae")
+legend("bottomright", legend=genre.names, col=color.list, lty=1,cex=1)
+```
+
+We felt like this was the best we could do for data visualization.
+
+```{r}
+plot(data.emb[[3]]@data@data, col=color.map, main="Data Visualization")
+legend("bottomleft", legend=genre.names, col=color.list, lty=1,cex=1)
+```
+
+Why did we stop here? What's reported here represents just a small part of the combinations of covariates we tried, and none of them solved the problem of visualization. Attempted improvements over this strategy mostly produced equivalent results. We believe that this is due to our ignorance in signal processing, and inability to make sensible use of the not so well documented wrassp functions.
+
+
+## Part 2: classification
+
+We tried 3 different classifiers
+
+1. k-nearest neighbours
+2. Gaussian kernel Support Vector Machines
+3. Random Forests
+
+We 5-cross-validated the first two to pick the best number of neighbours and the best kernel variance respectively.
+
+```{r}
+data.mat <- as.matrix(sapply(data[,-ncol(data)], as.numeric), ncol=ncol(data) - 1, nrow=n)
+  
+npars <- 15
+nfolds <- 5
+
+sigmas <- seq(0.1, 40, length.out = npars)
+fold.index <- caret::createFolds(labels, k=nfolds)
+
+knn.inaccuracy <- rep(0,npars)
+svm.inaccuracy <- rep(0,npars)
+
+for (k in 1:npars) {
+  for (ff in 1:nfolds) {
+    # splitting data
+    train.set <- data.mat[-fold.index[[ff]],]
+    test.set <- data.mat[fold.index[[ff]],]
+    
+    train.labels <- labels[-fold.index[[ff]]]
+    test.labels <- labels[fold.index[[ff]]]
+    
+    # KNN classifier
+    knn.test <- knn(train.set, test=test.set, cl=train.labels, k=k)
+    knn.inaccuracy[k] <- knn.inaccuracy[k] + 1 / nfolds * mean(test.labels != knn.test)
+  
+    # SVM classifier
+    svm.class <- ksvm(train.set, train.labels, sigma=sigmas[k])
+    svm.test <- predict(svm.class, test.set)
+    svm.inaccuracy[k] <- svm.inaccuracy[k] + 1 / nfolds * mean(test.labels != svm.test)
+  }
+}
+
+par(mfrow=c(1,2))
+plot(1:npars, knn.inaccuracy, main="KNN accuracy", type='l')
+plot(sigmas, svm.inaccuracy, main="SVM accuracy", type='l')
+
+best.k <- which.min(knn.inaccuracy)
+best.sigma <- which.min(svm.inaccuracy)
+```
+
+```{r}
+# creating training-testing partition
+train.index <- sample(1:n, floor(0.8 * n), replace = F)
+train.set <- data.mat[train.index,]
+test.set <- data.mat[-train.index,]
+
+# KNN classification
+test.pred <- knn(train.set, test.set, labels[train.index], k=best.k)
+knn.accuracy <- mean(test.pred == labels[-train.index])
+knn.accuracy
+```
+
+```{r}
+# SVM classification
+svm.obj <- ksvm(train.set, labels[train.index], sigma=best.sigma)
+test.pred <- predict(svm.obj, test.set)
+conf.matrix <- caret::confusionMatrix(test.pred, labels[-train.index])
+conf.matrix
+```
+
+```{r}
+# random forest
+rf.classifier <- randomForest(x=train.set, y=labels[train.index], 
+                              xtest=test.set, ytest=labels[-train.index], keep.forest = T)
+prediction <- predict(rf.classifier, test.set)
+conf.table <- caret::confusionMatrix(prediction, labels[-train.index])
+conf.table
+```
+
+
+******
+
+# Exercise 2A
+
+```{r packages_used}
+suppressMessages(require(mgcv,  quietly = T))
+suppressMessages(require(KernSmooth,  quietly = T))
+```
+
+
+## Part 0
+
+For later reference we show the component functions obtained by fitting the mgcv::gam model to the "ore" data.
+
+```{r gam_to_ore}
+load("hw_data/ore.RData")
+ore.gam <- gam(width ~ s(t1) + s(t2), data = ore)
+plot(ore.gam, pages = 1)
+```
+
+## Part 1
+
+We first went for the riskier route proposed in Wasserman of selecting separate bandwidths for each covariate during every iteration of the backfitting algorithm. In the code that follows we define two functions. 
+
+The first performs a round of 4-fold Cross Validation to select the optimal monodimensional smoother among the class of second degreee local polynomial estimators. We came to this choice of smoother by following the recommendation on Wasserman, according to whom local polynomials of degree 1 should be the defalut choice of smoother. We then experimented with 0,1,2 and 3 degree local polynomials, observing that the second degree ones produced predictions closest to the ones from mgcv::gam.
+The choice of 4-fold cross validation was made to speed up the code, since it showed similar results to the classical 10-fold CV.
+
+The second function implements the backfitting algorithm, calling the first one to perform smoothing.
+
+```{r backfit}
+# 4-fold CV for 1d-local polynomial
+cv.locpoly <- function(x,y, k=4) {
+  CV.indices <- caret::createFolds(y, k=k)
+
+  # cross-validating on 20 log-spaced bandwidths  
+  range.x <- range(x)
+  meas.x <- range.x[2] - range.x[1]
+
+  bw <- exp(seq(log(meas.x / length(x)), log(meas.x / 3), length.out=20))
+  test.error <- rep(0, length(bw))
+  
+  for (i in 1:k) {
+    # splitting data
+    training.X <- x[-CV.indices[[i]]]
+    training.Y <- y[-CV.indices[[i]]]
+    
+    validation.X <- x[CV.indices[[i]]]
+    validation.Y <- y[CV.indices[[i]]]
+    
+    # estimating risk vs bandwidth
+    for (b in 1:length(bw)) {  
+      y.hat <- locpoly(training.X, training.Y, degree=2, bandwidth=bw[b], 
+                      gridsize=200, range.x = range.x)
+      y.hat.validation.X <- approx(y.hat$x, y.hat$y, xout=validation.X, rule=2)$y
+      test.error[b] <- (test.error[b] 
+                        + 1/k * mean((y.hat.validation.X - validation.Y) ^ 2))
+    }
+  }
+  
+  # fitting using the optimal bandwidth
+  bw.opt <- bw[which.min(test.error)]
+  return(
+    locpoly(x, y, degree=2, bandwidth=bw.opt, gridsize=200, range.x = range.x)
+  )
+}
+
+# backfitting algorithm
+backfit <- function (X,Y, incr_tol = 1e-02, maxiter = 1e+03) {
+  d <- dim(X)[2]
+  n <- dim(X)[1]
+  
+  row.range <- apply(X, 2, range)
+  
+  # initializing
+  alpha.hat <- mean(Y)
+  m <- list()
+  M <- matrix(rep(0, d*n), nrow=n, ncol=d)
+  r <- matrix(rep(0, d*n), nrow=n, ncol=d)
+  
+  # starting error
+  rss0 <- sum((Y - alpha.hat - rowSums(M)) ^ 2)
+  
+  # running
+  iter <- 0
+  incr <- incr_tol + 1
+  while ((incr > incr_tol) && (iter < maxiter)) {
+    for (j in 1:d) {
+      # updating residual
+      r[,j] <- Y - alpha.hat - M[,-j]
+      # smoothing residual
+      sm.grid <- cv.locpoly(X[,j], r[,j])
+      sm.fun <- approxfun(sm.grid$x, sm.grid$y, rule=2)
+      M[,j] <- sm.fun(X[,j])
+      # recentering
+      M[,j] <- M[,j] - mean(M[,j])
+      m[[j]] <- approxfun(X[,j], M[,j], rule=2)
+    }
+    
+    # increment control
+    rss <- sum((Y - alpha.hat - rowSums(M)) ^ 2)
+    incr <- abs(rss - rss0) / rss
+    rss0 <- rss
+    iter <- iter + 1
+  }
+  
+  # building additive model
+  model <- function(x) {
+    pred <- rep(alpha.hat, dim(x)[1])
+    for (j in 1:dim(x)[2]) {
+      pred <- pred + m[[j]](x[,j])
+    }
+    return(pred)
+  }
+  
+  return(list(m=m, M=M, model=model, iterations=iter))
+}
+```
+
+## Part 2
+
+As instructed we then fitted the additive model on the "ore.Rdata" dataset. Here we plot the model's prediction curves against the two original covariates t1,t2.
+
+```{r additive_model_test}
+# applying to ore data
+X <- cbind(ore$t1, ore$t2)
+add.model <- backfit(X, ore$width)
+
+# plotting results
+x1 <- seq(range(ore$t1)[1], range(ore$t1)[2], length.out=100)
+x2 <- seq(range(ore$t2)[1], range(ore$t2)[2], length.out=100)
+
+par(mfrow=c(1,2))
+
+plot(ore$t1, ore$width, xlab='t1', ylab='m1(t1)')
+lines(x1, mean(ore$width) + add.model$m[[1]](x1))
+
+plot(ore$t2, ore$width, xlab='t2', ylab='m2(t2)')
+lines(x2, mean(ore$width) + add.model$m[[2]](x2))
+
+mtext("Component functions over datapoints", outer=T)
+```
+
+To compare our results to the ones obtained by mgcv::gam we computed the MSE on the datapoints and plotted the two overlaid functions $m_1, m_2$. The larger error in the first component function reflects the curve discrepancy observed in the first plot.
+
+```{r}
+# comparing to mgcv.gam predictions
+gam.pred <- predict(ore.gam)
+
+# ...through mse...
+mse <- mean((gam.pred - add.model$model(X))^2)
+print(mse)
+```
+
+```{r}
+# ...through overlaid plots
+gam.terms <- predict(ore.gam, type='terms')
+par(mfrow=c(1,2))
+
+plot(ore$t1, gam.terms[,1], type='l', xlab='t1', ylab='m1(t1)')
+lines(ore$t1, add.model$M[,1], col="red")
+
+t2.sorted <- sort(ore$t2, index.return=T)
+plot(t2.sorted$x, gam.terms[t2.sorted$ix,2], type='l', xlab='t2', ylab='m2(t2)')
+lines(t2.sorted$x, add.model$M[t2.sorted$ix,2], col="red")
+
+mtext("Component functions: mgcv::gam vs add.model", outer=T)
+```
+
+
+## Part 1, take 2
+
+We were slightly unsatified with these results, mainly because the model failed to recognise the last downward trend in the width ~ t1 relationship, and we suspected that this was due to teh way we built the component functions $m_i$. We linearly interpolated the $M_{ij} = \widehat m_i(x_j)$ matrix returned by Kernsmooth::locpoly, which added a significant error of approximation.
+We thus implemented a simpler smoother, the Nadaraya–Watson kernel, in a function that returned both a callable object and a vector containing the function evaluated on the datapoints.
+
+```{r my_smoother}
+k.smoother <- function(x,y,h) {
+  n <- length(y)
+  kernel <- function(v) dnorm(v / h)
+  
+  func <- function(v) {
+    ret <- rep(0, length(v))
+    for (j in 1:length(v)) {
+      ret[j] <- y %*% kernel(v[j] - x) / sum(kernel(v[j] - x))
+    }
+    return(ret)
+  }
+  
+  func.x <- func(x)
+  diffs <- matrix(rep(x), nrow=n, ncol=n) - matrix(rep(x), nrow=n, ncol=n, byrow=T)
+  
+  # effective degrees of freedom = tr(L(X)), will be useful in exercise 2B
+  df <- kernel(0) * sum(1 / rowSums(kernel(diffs)))
+  
+  return(list(func=func, y=func.x, df=df))
+}
+```
+
+Here we chose to take the less adventurous route of normalizing the data and running a global round of 10-fold CV to estimate a global bandwidth for all the smoothers.
+
+```{r backfit_attempt2}
+backfit <- function (X,Y, smoother.bw, incr_tol = 1e-04, maxiter = 1e+03) {
+  d <- dim(X)[2]
+  n <- dim(X)[1]
+  
+  # initializing
+  alpha.hat <- mean(Y)
+  M <- matrix(rep(0, d*n), nrow=n, ncol=d)
+  r <- matrix(rep(0, d*n), nrow=n, ncol=d)
+  
+  # starting error
+  rss0 <- sum((Y - alpha.hat - rowSums(M)) ^ 2)
+  
+  # running
+  sm.obj <- list()
+  iter <- 0
+  incr <- incr_tol + 1
+  while ((incr > incr_tol) && (iter < maxiter)) {
+    for (j in 1:d) {
+      # updating residual
+      r[,j] <- Y - alpha.hat - M[,-j]
+      # smoothing residual
+      sm.obj[[j]] <- k.smoother(X[,j], r[,j], h=smoother.bw)
+      # recentering
+      M[,j] <- sm.obj[[j]]$y - mean(sm.obj[[j]]$y)
+    }
+    
+    # increment control
+    rss <- sum((Y - alpha.hat - rowSums(M)) ^ 2)
+    incr <- abs(rss - rss0) / rss
+    rss0 <- rss
+    iter <- iter + 1
+  }
+  
+  # building additive model
+  model <- function(x) {
+    d <- dim(x)[2]
+    n <- dim(x)[1]
+    
+    pred <- rep(alpha.hat, n)
+    for (j in 1:d) {
+      pred <- pred + sm.obj[[j]]$func(x[,j]) - mean(sm.obj[[j]]$y)
+    }
+    return(pred)
+  }
+  
+  return(list(model=model, iterations=iter, M=M))
+}
+```
+
+## Part 2, take 2
+
+In the code that follows we apply the additive model to the normalized ore data.
+
+```{r}
+# creating matrix of normalized covariates
+trasf <- list()
+trasf[[1]] <- function(v) (v - mean(ore$t1)) / sd(ore$t1)
+trasf[[2]] <- function(v) (v - mean(ore$t2)) / sd(ore$t2)
+
+trasf.t1 <- trasf[[1]](ore$t1)
+trasf.t2 <- trasf[[2]](ore$t2)
+
+X <- cbind(trasf.t1, trasf.t2)
+
+# splitting for CV
+k = 10
+CV.indices <- caret::createFolds(ore$width, k=k)
+
+# cross-validating on 30 bandwidths
+bw <- seq(0.01, 1.5, length.out=30)
+test.error <- rep(0, length(bw))
+
+for (i in 1:k) {
+  # splitting data
+  training.X <- X[-CV.indices[[i]],]
+  training.Y <- ore$width[-CV.indices[[i]]]
+  
+  validation.X <- X[CV.indices[[i]],]
+  validation.Y <- ore$width[CV.indices[[i]]]
+  
+  # estimating risk vs bandwidth
+  for (b in 1:length(bw)) {  
+    pred <- backfit(training.X, training.Y, smoother.bw = bw[b])
+    test.error[b] <- test.error[b] + 1/k * mean((pred$model(validation.X) - validation.Y)^2)
+  }
+}
+
+# fitting using the optimal bandwidth
+par(mfrow=c(1,1))
+plot(bw, test.error, type='l', xlab='Global smoother bandwidth', ylab='Estimated Risk')
+
+bw.opt <- bw[which.min(test.error)]
+print(bw.opt)
+pred <- backfit(X, ore$width, bw.opt)
+
+# plotting component functions over data
+par(mfrow=c(1,2))
+
+plot(ore$t1, ore$width, xlab='t1', ylab='m1(t1)')
+lines(ore$t1, mean(ore$width) + pred$M[,1])
+
+plot(ore$t2, ore$width, xlab='t2', ylab='m2(t2)')
+lines(t2.sorted$x, mean(ore$width) + pred$M[t2.sorted$ix,2])
+
+mtext("Component functions over datapoints", outer=T)
+
+# comparing to mgcv.gam predictions
+gam.pred <- predict(ore.gam)
+
+# ...through mse...
+mse <- mean((gam.pred - pred$model(X))^2)
+print(mse)
+
+# ...through overlaid plots
+par(mfrow=c(1,2))
+
+plot(ore$t1, gam.terms[,1], type='l', xlab='t1', ylab='m1(t1)')
+lines(ore$t1, pred$M[,1], col="red")
+
+t2.sorted <- sort(ore$t2, index.return=T)
+plot(t2.sorted$x, gam.terms[t2.sorted$ix,2], type='l', xlab='t2', ylab='m2(t2)')
+lines(t2.sorted$x, pred$M[t2.sorted$ix,2], col="red")
+
+mtext("Component functions: mgcv::gam vs add.model", outer=T)
+```
+
+# Exercise 2B
+
+After defining the training and testing data we present the MSE obtained using SAM::samQL. To obtain the best regularization parameter we tried performinga round of 10-fold CV on the samQL model as suggested in the homework text. In spite of this we ended up picking the smoothing parameter for the samQL estimator by hand. This is because the risk estimation given by the test error was identical for all the smoothing parameters. A code error on our side? Probably, but we weren't able to spot it.
+We added the gaussian $\sim \mathcal{N}(0,1)$ noise on the training reponse vector y.tr, but not on the testing one.
+
+```{r samQL}
+suppressMessages(require(SAM,  quietly = T))
+
+# Defining functions
+m1 = function(x) -2 * sin(2 * x)
+m2 = function(x) x^2 - 1/3
+m3 = function(x) x - 0.5
+m4 = function(x) exp(-x) + exp(-1) - 1
+
+# Generating training data
+n.tr = 150; d = 200
+X.tr = 0.5*matrix(runif(n.tr*d),n.tr,d) + matrix(rep(0.5*runif(n.tr),d),n.tr,d)
+# Generating response
+y.tr = m1(X.tr[,1]) + m2(X.tr[,2]) + m3(X.tr[,3]) + m4(X.tr[,4]) + rnorm(n.tr)
+
+# Generating testing data
+n.te = 500; d = 200
+X.te = 0.5*matrix(runif(n.te*d),n.te,d) + matrix(rep(0.5*runif(n.te),d),n.te,d)
+# Generating response
+y.te = m1(X.te[,1]) + m2(X.te[,2]) + m3(X.te[,3]) + m4(X.te[,4])
+
+
+# splitting for CV
+k = 10
+CV.indices <- caret::createFolds(y.tr, k=k)
+
+# cross-validating on 30 log-spaced bandwidths
+lambdas <- seq(2, 0.1, length.out = 30)
+nbandwidths <- length(lambdas)
+test.error <- rep(0, nbandwidths)
+
+for (i in 1:k) {
+  # splitting data
+  training.X <- X.tr[-CV.indices[[i]],]
+  training.Y <- y.tr[-CV.indices[[i]]]
+  
+  validation.X <- X.tr[CV.indices[[i]],]
+  validation.Y <- y.tr[CV.indices[[i]]]
+  
+  # Training: computes estimates for all lambdas at the same time according to documentation
+  out.tr = samQL(training.X, training.Y, lambda=lambdas)
+  # Testing
+  out.te = predict(out.tr, validation.X)[[1]]
+  
+  # estimating risk vs bandwidth
+  for (b in 1:nbandwidths) {  
+    test.error[b] <- test.error[b] + 1/k * mean((out.te[,b] - validation.Y)^2)
+  }
+}
+
+# training on the best bandwidth
+plot(out.tr$lambda, test.error, type='l')
+
+bw.opt <- out.tr$lambda[which.min(test.error)]
+print(c('Optimal lambda', bw.opt))
+out.tr <- samQL(X.tr, y.tr, lambda=0.001) # hand-picked bandwidth
+
+# testing 
+out.te <- predict(out.tr, X.te)[[1]]
+
+# plotting component function L2 norms
+plot(1:d, out.tr$func_norm, type = 'l')
+
+error <- mean((out.te - y.te)^2)
+print(c('MSE on X.te', error))
+```
+
+To furter assess the quality of the model we plotted the first 4 estimated component functions on top of $m_1, m_2, m_3, m_4$. 
+
+```{r}
+build.test <- function(x,dd) {
+  # returns a length(x) by d matrix having x as the dd-th column and zeros everywhere else
+  
+  ll <- length(x)
+  z.mat <- matrix(rep(0,ll * d), nrow=ll, ncol=d)
+  z.mat[,dd] <- x
+  return(z.mat)
+}
+
+# getting component functions
+x <- 1:100/100
+m1.hat <- predict(out.tr, build.test(x,1))[[1]]
+m2.hat <- predict(out.tr, build.test(x,2))[[1]]
+m3.hat <- predict(out.tr, build.test(x,3))[[1]]
+m4.hat <- predict(out.tr, build.test(x,4))[[1]]
+
+# plotting component functions against the true ones
+par(mfrow=c(2,2))
+plot(x, m1.hat, ylim=c(-3,0), type='l')
+lines(x, m1(x), col="red")
+plot(x, m2.hat - mean(y.tr), ylim=c(-1,1), type='l')
+lines(x, m2(x), col="red")
+plot(x, m3.hat - mean(y.tr), ylim=c(-1,1), type='l')
+lines(x, m3(x), col="red")
+plot(x, m4.hat - mean(y.tr), ylim=c(-1,1), type='l')
+lines(x, m4(x), col="red")
+
+mtext("Estimated component functions (black) over $m_i$ (red)", outer=T)
+```
+
+
+Here comes our attempt. Since the Kernsmooth package smoothers did not return the effective degrees of freedom we recycled the Nadaraya-Watson kernel estimator that we employed in the previous exercise. We also made it return an estimate of the risk based on the GCV score for a linear smoother $\widehat f_n(x) = L(x)Y$ (Wasserman, Theorem 5.34).
+
+$$\widehat R(\lambda_j) = \frac 1n \sum_{i=1}^n \left( \frac{y_i - \widehat f_n(X_i)}{1 - L_{ii}} \right)^2$$
+with $\lambda_j$ being the bandwidth of $f_n$ and $L_{ii} = L_i(X_i)$.
+
+The function k.smoother.loo below implements Leave-one-out cross validation based on the risk estimate $\widehat R$ above. At first we used it to choose the individual smoother bandwidth $\lambda_j$ for every $1\leq j \leq 400$. In the end though we decided to not make use of this function and pick the bandwidth manually, since the generated covariates $X_i(j) \quad j \in \{1,\dots,400\}$ are uniformly spaced across all 400 dimensions. This significantly reduced computation time.
+
+```{r spam}
+k.smoother.loo <- function(j,x,y, bandwidths = exp(seq(log(5e-04), log(5e-02), length.out=5))) {
+  risks <- rep(0, length(bandwidths))
+  for (b in 1:length(bandwidths)) {
+    risks[b] <- k.smoother(x,y, bandwidths[b])$risk
+  }
+  
+  return(
+    k.smoother(x,y, bandwidths[which.min(risks)])
+  )
+}
+
+# sparse additive model implementation
+spam <- function (X,Y, lambda, incr_tol = 1e-02, maxiter = 1e+02) {
+  n <- dim(X)[1]
+  d <- dim(X)[2]
+  
+  # initializing
+  alpha.hat <- mean(Y)
+  m <- list()
+  sm.obj <- list()
+  M <- matrix(rep(0, d*n), nrow=n, ncol=d)
+  r <- matrix(rep(0, d*n), nrow=n, ncol=d)
+  
+  # starting error
+  rss0 <- sum((Y - alpha.hat - rowSums(M)) ^ 2)
+  
+  # running
+  iter <- 0
+  incr <- incr_tol + 1
+  while ((incr > incr_tol) && (iter < maxiter)) {
+    for (j in 1:d) {
+      # updating residual
+      r[,j] <- Y - alpha.hat - rowSums(M[,-j])
+      # smoothing residual
+      #sm.obj[[j]] <- k.smoother.loo(j,X[,j], r[,j]) # performs CV on each linear smoother
+      sm.obj[[j]] <- k.smoother(X[,j], r[,j], 0.02)  # hand-picked bandwidth
+      u.hat <- sm.obj[[j]]$y
+      l2.hat <- mean(u.hat ^ 2)
+      M[,j] <- pmax(0, 1 - lambda / sqrt(l2.hat)) * u.hat
+      # recentering
+      M[,j] <- M[,j] - mean(M[,j])
+    }
+    
+    # increment control
+    rss <- sum((Y - alpha.hat - rowSums(M)) ^ 2)
+    incr <- abs(rss - rss0) / rss
+    rss0 <- rss
+    iter <- iter + 1
+  }
+  
+  # building additive model function
+  model <- function(x) {
+    pred <- rep(alpha.hat, dim(x)[1])
+    for (j in 1:(dim(x)[2])) {
+      pred <- pred + sm.obj[[j]]$func(x[,j]) - mean(M[,j])
+    }
+    return(pred)
+  }
+  
+  # computing effective degrees of freedom
+  edf <- rep(0,d)
+  for (j in 1:d) {
+    edf[j] <- sm.obj[[j]]$df
+  }
+  
+  return(list(model=model, iterations=iter, M=M, edf=edf))
+}
+
+
+# compunting the optimal global penalization by minimizing the GCV estimate of the risk
+bw <- seq(1e-04, 1e-02, length.out=10)
+y.tr.bar <- mean(y.tr) 
+
+df <- rep(0, length(bw))
+GCV <- rep(0, length(bw))
+  
+for (b in 1:length(bw)) {
+  pred <- spam(X.tr, y.tr, lambda = bw[b])
+  df[b] <- sum(pred$edf * (colSums((pred$M)^2) != 0))
+  GCV[b] <- mean((y.tr - y.tr.bar - rowSums(pred$M)) ^ 2) / (1 - df[b] / n.tr) ^ 2
+}
+
+
+# fitting using the optimal bandwidth
+par(mfrow=c(1,1))
+plot(bw, GCV, type='l')
+
+bw.opt <- bw[which.min(GCV)]
+print(c('Optimal lambda', bw.opt))
+spam.model <- spam(X.tr, y.tr, lambda=bw.opt)
+
+error <- mean((spam.model$model(X.te) - y.te) ^ 2)
+print(c('Test MSE', error))
+```
+
+The small bandwidths are due to the attempt of framing a minimum for the GCV estimates, which we were not able to obtain even for much smaller ones. 
+As with the samQL estimate, we plot the estimated component functions over the true ones.
+
+```{r}
+# plotting component functions
+par(mfrow=c(2,2))
+plot(x, spam.model$model(build.test(x,1)), type='l', ylim=c(-2.5,0))
+lines(x, m1(x), col="red")
+plot(x, spam.model$model(build.test(x,2)), ylim=c(-1,1), type='l')
+lines(x, m2(x), col="red")
+plot(x, spam.model$model(build.test(x,3)), ylim=c(-1,1), type='l')
+lines(x, m3(x), col="red")
+plot(x, spam.model$model(build.test(x,4)), ylim=c(-1.3,1), type='l')
+lines(x, m4(x), col="red")
+
+mtext("Estimated component functions (black) over $m_i$ (red)", outer=T)
+```
+
